@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UrlScout - check a link before you click it</title>
+<style>
+  :root {
+    --bg: #e6efec;  --panel: #fafcfb;  --ink: #1c3836;  --muted: #5a7270;
+    --line: #c5d6d2; --accent: #1b6b73;
+    --bad: #b5312a; --warn: #b4720c; --good: #2a7a4d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 "Segoe UI", Tahoma, Verdana, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 18px 60px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 26px; }
+  .box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px; margin-bottom: 18px; }
+  form { display: flex; gap: 10px; flex-wrap: wrap; }
+  input[type=text] { flex: 1 1 280px; padding: 11px 12px; font-size: 16px; color: var(--ink);
+         border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+  button { font: inherit; cursor: pointer; }
+  .go { padding: 11px 22px; background: var(--accent); color: #fff; border: 0; border-radius: 4px; }
+  .go:disabled { opacity: .6; cursor: wait; }
+  :focus-visible { outline: 3px solid #e0a93b; outline-offset: 2px; }
+  .opts { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 12px; font-size: 14px; color: var(--muted); }
+  .try button { background: none; border: 0; padding: 0 4px; color: var(--accent); text-decoration: underline; font-size: 14px; }
+  .verdict { display: flex; align-items: center; gap: 14px; }
+  .dot { width: 18px; height: 18px; border-radius: 50%; flex: none; }
+  .verdict h2 { margin: 0; font-size: 22px; }
+  .verdict small { color: var(--muted); word-break: break-all; }
+  .bar { height: 10px; background: #dbe7e4; border-radius: 5px; margin: 14px 0 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; transition: width .4s; }
+  .scale { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  ul.sig { list-style: none; padding: 0; margin: 14px 0 0; }
+  ul.sig li { display: flex; gap: 12px; padding: 9px 0; border-top: 1px solid var(--line); }
+  ul.sig b { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--bad); } .neg { color: var(--good); }
+  h3 { margin: 0 0 8px; font-size: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td { padding: 7px 4px; border-top: 1px solid var(--line); word-break: break-all; }
+  td:last-child { white-space: nowrap; text-align: right; }
+  .err { color: var(--bad); margin: 10px 0 0; }
+  .deep { font-size: 14px; color: var(--muted); margin-top: 12px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>UrlScout</h1>
+  <p class="sub">Paste a link. We check it before you click it.</p>
+
+  <section class="box">
+    <form id="form">
+      <input type="text" id="url" placeholder="https://example.com/login" autocomplete="off" aria-label="URL to check" required>
+      <button class="go" id="go">Analyze</button>
+    </form>
+    <div class="opts">
+      <label><input type="checkbox" id="deep"> Deep scan (DNS, certificate, redirects)</label>
+      <span class="try">Try:
+        <button type="button" data-u="https://github.com/anthropics">safe</button>
+        <button type="button" data-u="bit.ly/3xYz9">suspicious</button>
+        <button type="button" data-u="http://paypa1-secure-login.xyz/verify/account">malicious</button>
+      </span>
+    </div>
+    <p class="err" id="err" hidden></p>
+  </section>
+
+  <section class="box" id="result" hidden>
+    <div class="verdict">
+      <span class="dot" id="dot"></span>
+      <div><h2 id="label"></h2><small id="host"></small></div>
+    </div>
+    <div class="bar"><i id="fill"></i></div>
+    <div class="scale"><span>0 safe</span><span id="score"></span><span>100 dangerous</span></div>
+    <ul class="sig" id="sigs"></ul>
+    <div class="deep" id="deepinfo" hidden></div>
+  </section>
+
+  <section class="box">
+    <h3>Recent checks</h3>
+    <table><tbody id="history"><tr><td>Nothing yet.</td></tr></tbody></table>
+  </section>
+</main>
+
+<script>
+// Same origin when Flask serves this page. If you host the frontend elsewhere,
+// set this to your backend address, e.g. "http://127.0.0.1:5000".
+const API = "";
+
+const LOOK = {
+  safe:       { color: "var(--good)", text: "Looks safe" },
+  suspicious: { color: "var(--warn)", text: "Suspicious" },
+  malicious:  { color: "var(--bad)",  text: "Likely malicious" },
+};
+const $ = id => document.getElementById(id);
+
+function el(tag, text, cls) {           // textContent only: scanned URLs are untrusted
+  const e = document.createElement(tag);
+  if (text !== undefined) e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+
+function showError(msg) { $("err").textContent = msg; $("err").hidden = !msg; }
+
+function render(r) {
+  const look = LOOK[r.verdict];
+  $("dot").style.background = look.color;
+  $("fill").style.background = look.color;
+  $("fill").style.width = r.score + "%";
+  $("label").textContent = look.text;
+  $("host").textContent = r.url;
+  $("score").textContent = "risk " + r.score + "/100";
+
+  const ul = $("sigs"); ul.replaceChildren();
+  if (!r.signals.length) ul.append(el("li", "No warning signs found in the URL itself."));
+  r.signals.forEach(s => {
+    const li = el("li");
+    li.append(el("b", (s.points > 0 ? "+" : "") + s.points, s.points > 0 ? "pos" : "neg"), el("span", s.why));
+    ul.append(li);
+  });
+
+  const d = $("deepinfo");
+  if (r.deep) {
+    const bits = [];
+    if (r.deep.cert) bits.push("Certificate by " + r.deep.cert.issuer + ", " + r.deep.cert.age_days + " days old");
+    if (r.deep.redirects) bits.push((r.deep.redirects.length - 1) + " redirect(s)");
+    ["note", "cert_error", "fetch_error"].forEach(k => r.deep[k] && bits.push(r.deep[k]));
+    d.textContent = "Deep scan: " + (bits.join(" / ") || "no extra data");
+    d.hidden = false;
+  } else d.hidden = true;
+  $("result").hidden = false;
+}
+
+async function loadHistory() {
+  try {
+    const rows = await (await fetch(API + "/api/history")).json();
+    const tb = $("history"); tb.replaceChildren();
+    if (!rows.length) { const tr = el("tr"); tr.append(el("td", "Nothing yet.")); tb.append(tr); return; }
+    rows.forEach(r => {
+      const tr = el("tr"), last = el("td", LOOK[r.verdict].text + " (" + r.score + ")");
+      last.style.color = LOOK[r.verdict].color;
+      tr.append(el("td", r.url), last); tb.append(tr);
+    });
+  } catch { /* backend offline: leave table as is */ }
+}
+
+$("form").addEventListener("submit", async e => {
+  e.preventDefault(); showError("");
+  $("go").disabled = true; $("go").textContent = "Checking...";
+  try {
+    const res = await fetch(API + "/api/analyze", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: $("url").value, deep: $("deep").checked }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Something went wrong.");
+    render(data); loadHistory();
+  } catch (err) {
+    showError(err instanceof TypeError ? "Can't reach the backend. Is app.py running?" : err.message);
+  } finally { $("go").disabled = false; $("go").textContent = "Analyze"; }
+});
+
+document.querySelectorAll(".try button").forEach(b =>
+  b.addEventListener("click", () => { $("url").value = b.dataset.u; $("form").requestSubmit(); }));
+
+loadHistory();
+</script>
+</body>
+</html>
